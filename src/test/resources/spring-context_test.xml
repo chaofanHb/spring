@@ -1,0 +1,178 @@
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:context="http://www.springframework.org/schema/context"
+       xmlns:tx="http://www.springframework.org/schema/tx"
+       xmlns:rabbit="http://www.springframework.org/schema/rabbit"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xmlns:task="http://www.springframework.org/schema/task"
+       xmlns:aop="http://www.springframework.org/schema/aop"
+       xsi:schemaLocation="http://www.springframework.org/schema/rabbit
+	http://www.springframework.org/schema/rabbit/spring-rabbit-1.4.xsd
+	http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-3.2.xsd
+	http://www.springframework.org/schema/aop http://www.springframework.org/schema/aop/spring-aop-2.5.xsd
+	http://www.springframework.org/schema/tx http://www.springframework.org/schema/tx/spring-tx-3.2.xsd
+	http://www.springframework.org/schema/task http://www.springframework.org/schema/task/spring-task-3.2.xsd
+	http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context-3.2.xsd
+	http://www.springframework.org/schema/rabbit http://www.springframework.org/schema/rabbit/spring-rabbit-1.4.xsd">
+
+
+    <context:property-placeholder
+            ignore-resource-not-found="true" location="classpath*:/redis.properties,/james.properties"/>
+    <context:component-scan base-package="com.cn.*"></context:component-scan>
+    <aop:aspectj-autoproxy proxy-target-class="false" />
+
+    <!-- jedis 配置 -->
+    <bean id="poolConfig" class="redis.clients.jedis.JedisPoolConfig">
+        <property name="maxIdle" value="${redis.maxIdle}"/>
+        <property name="maxWaitMillis" value="${redis.maxWait}"/>
+        <property name="testOnBorrow" value="${redis.testOnBorrow}"/>
+    </bean>
+    <!-- redis服务器中心 -->
+    <bean id="connectionFactory" class="org.springframework.data.redis.connection.jedis.JedisConnectionFactory">
+        <property name="poolConfig" ref="poolConfig"/>
+        <property name="port" value="${redis.port}"/>
+        <property name="hostName" value="${redis.host}"/>
+        <property name="timeout" value="${redis.maxActive}"></property>
+    </bean>
+    <bean id="redisTemplate" class="org.springframework.data.redis.core.RedisTemplate">
+        <property name="connectionFactory" ref="connectionFactory"/>
+        <property name="keySerializer">
+            <bean class="org.springframework.data.redis.serializer.StringRedisSerializer"/>
+        </property>
+        <property name="valueSerializer">
+            <bean class="org.springframework.data.redis.serializer.JdkSerializationRedisSerializer"/>
+        </property>
+    </bean>
+
+
+    <!-- rabbitMQ 配置-->
+    <!-- 定义RabbitMQ的连接工厂 -->
+    <bean id="rabbitConnFactory" class="com.rabbitmq.client.ConnectionFactory">
+        <property name="host" value="172.16.13.201"/>
+        <property name="port" value="${mq.port}"/>
+        <property name="username" value="guest"/>
+        <property name="password" value="guest"/>
+        <property name="virtualHost" value="${mq.vhost}"/>
+    </bean>
+    <rabbit:connection-factory id="MQconnectionFactory" connection-factory="rabbitConnFactory"/>
+    <!-- 定义Rabbit模板，指定连接工厂以及定义exchange -->
+    <rabbit:template id="amqpTemplate" connection-factory="MQconnectionFactory" exchange="fanoutExchange"
+                     message-converter="jsonMessageConverter"/>
+    <!-- 消息对象json转换类 -->
+    <bean id="jsonMessageConverter" class="org.springframework.amqp.support.converter.Jackson2JsonMessageConverter"/>
+    <!-- MQ的管理，包括队列、交换器等 -->
+    <rabbit:admin connection-factory="MQconnectionFactory"/>
+    <!-- 定义队列，自动声明 -->
+    <rabbit:queue id="k1" name="k1" auto-declare="true" durable="true"/>
+    <!-- 定义交换器，自动声明 -->
+    <rabbit:fanout-exchange name="fanoutExchange" auto-declare="true">
+        <rabbit:bindings>
+            <rabbit:binding queue="k1"/>
+        </rabbit:bindings>
+    </rabbit:fanout-exchange>
+    <rabbit:listener-container connection-factory="MQconnectionFactory" acknowledge="auto">
+        <rabbit:listener ref="userReportListener" queues="k1"/>
+    </rabbit:listener-container>
+
+    <!--定时线程-->
+    <!--<bean class="com.cn.thread.ScheduledThread" init-method="start" destroy-method="stop">
+        <property name="delay" value="5"></property>
+    </bean>-->
+
+    <bean id="outputJob" class="com.cn.timeTask.OutputJob"></bean>
+    <task:scheduled-tasks>
+        <task:scheduled ref="outputJob" method="print" cron="0 30 14 * * ?"/>
+    </task:scheduled-tasks>
+
+    <!--shiro配置-->
+    <bean id="securityManager" class="org.apache.shiro.web.mgt.DefaultWebSecurityManager">
+        <property name="realm" ref="myShiroRealm" />
+        <property name="cacheManager" ref="cacheManager" />
+    </bean>
+
+    <!-- 項目自定义的Realm -->
+    <bean id="myShiroRealm" class="com.cn.shiro.Shiro">
+        <property name="cacheManager" ref="cacheManager" />
+    </bean>
+
+    <!-- Shiro Filter -->
+    <bean id="shiroFilter" class="org.apache.shiro.spring.web.ShiroFilterFactoryBean">
+        <property name="securityManager" ref="securityManager" />
+        <property name="loginUrl" value="/login.jhtml" />
+        <property name="successUrl" value="/loginsuccess.jhtml" />
+        <property name="unauthorizedUrl" value="/error.jhtml" />
+        <property name="filterChainDefinitions">
+            <value>
+                /login.jhtml = authc
+                /checkLogin.json = anon
+                /loginsuccess.jhtml = roles[administrator]
+                /logout.json = anon
+                /hebin/**=anon
+                /** = authc
+            </value>
+        </property>
+    </bean>
+
+    <!-- 用户授权信息Cache -->
+    <bean id="cacheManager" class="org.apache.shiro.cache.MemoryConstrainedCacheManager" />
+    <!-- 保证实现了Shiro内部lifecycle函数的bean执行 -->
+    <bean id="lifecycleBeanPostProcessor" class="org.apache.shiro.spring.LifecycleBeanPostProcessor" />
+    <!-- AOP式方法级权限检查 -->
+    <bean class="org.springframework.aop.framework.autoproxy.DefaultAdvisorAutoProxyCreator"
+          depends-on="lifecycleBeanPostProcessor">
+        <property name="proxyTargetClass" value="true" />
+    </bean>
+    <bean class="org.apache.shiro.spring.security.interceptor.AuthorizationAttributeSourceAdvisor">
+        <property name="securityManager" ref="securityManager" />
+    </bean>
+
+    <!--james邮件-->
+    <bean id="mailSender" class="org.springframework.mail.javamail.JavaMailSenderImpl">
+        <property name="host" value="${spring.mail.host}"></property>
+        <property name="username" value="${spring.mail.username}"></property>
+        <property name="password" value="${spring.mail.password}"></property>
+        <property name="defaultEncoding" value="${spring.mail.default-encoding}"></property>
+        <property name="javaMailProperties" >
+            <props>
+                <prop key="mail.smtp.auth">true</prop>
+            </props>
+        </property>
+    </bean>
+
+    <bean id="velocityEngine"
+          class="org.springframework.ui.velocity.VelocityEngineFactoryBean">
+        <property name="resourceLoaderPath" value="/file"></property>
+        <property name="velocityProperties">
+            <props>
+                <!--指定根目录下-->
+                <!-- <prop key="file.resource.loader.class">org.apache.velocity.runtime.resource.loader.ClasspathResourceLoader</prop>-->
+                <prop key="default.contentType">text/html; charset=utf-8</prop>
+                <prop key="file.resource.loader.cache">false</prop>
+                <prop key="file.resource.loader.modificationCheckInterval">3</prop>
+                <prop key="input.encoding">UTF-8</prop>
+                <prop key="output.encoding">UTF-8</prop>
+            </props>
+        </property>
+    </bean>
+
+    <bean name="genericObjectPoolConfig" class="org.apache.commons.pool2.impl.GenericObjectPoolConfig" >
+        <property name="maxWaitMillis" value="-1" />
+        <property name="maxTotal" value="1000" />
+        <property name="minIdle" value="8" />
+        <property name="maxIdle" value="100" />
+    </bean>
+
+    <bean id="jedisCluster" class="com.cn.util.JedisClusterFactory">
+        <property name="addressConfig">
+            <value>classpath:connect-redis.properties</value>
+        </property>
+        <property name="addressKeyPrefix" value="address" />   <!--  属性文件里  key的前缀 -->
+
+        <property name="timeout" value="300000" />
+        <property name="maxRedirections" value="6" />
+        <property name="genericObjectPoolConfig" ref="genericObjectPoolConfig" />
+    </bean>
+    
+    <bean id="temp" class="com.Temp">
+        <property name="jedisCluster" ref="jedisCluster"></property>
+    </bean>
+</beans>
